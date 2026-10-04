@@ -1,0 +1,602 @@
+#include <ctype.h>
+#include <float.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define N 9
+#define MAX_DETOUR_MINUTES 5.0
+
+enum Place {
+    HOSPITAL,
+    CENTRAL_JUNCTION,
+    MARKET,
+    COLLEGE,
+    FIRE_STATION,
+    RIVER_ROAD,
+    OLD_BRIDGE,
+    STATION,
+    RELIEF_CAMP
+};
+
+typedef enum {
+    CLEAR,
+    LIGHT_RAIN,
+    HEAVY_RAIN,
+    STORM
+} Weather;
+
+typedef enum {
+    OPEN,
+    CONGESTED,
+    FLOODED,
+    BLOCKED
+} Status;
+
+typedef struct {
+    bool exists;
+    double distanceKm;
+    double baseMinutes;
+    double currentMinutes;
+    double widthMeters;
+    double reliability;
+    double incidentDelay;
+    Status status;
+} Road;
+
+typedef struct {
+    bool found;
+    double score;
+    double eta;
+    double distance;
+    double risk;
+    int path[N];
+    int length;
+} Route;
+
+const char *places[N] = {
+    "Hospital",
+    "Central Junction",
+    "Market",
+    "College",
+    "Fire Station",
+    "River Road",
+    "Old Bridge",
+    "Station",
+    "Relief Camp"
+};
+
+Road city[N][N];
+Weather activeWeather = CLEAR;
+
+/* -------------------- INPUT FUNCTIONS -------------------- */
+
+int readChoice(const char *prompt, int min, int max) {
+    char line[64];
+    int value;
+
+    while (true) {
+        printf("%s", prompt);
+
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            return min;
+        }
+
+        if (sscanf(line, "%d", &value) == 1 &&
+            value >= min && value <= max) {
+            return value;
+        }
+
+        printf("Invalid choice. Try again.\n");
+    }
+}
+
+double readDouble(const char *prompt) {
+    char line[64];
+    double value;
+
+    while (true) {
+        printf("%s", prompt);
+
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            return 0.0;
+        }
+
+        if (sscanf(line, "%lf", &value) == 1 && value >= 0) {
+            return value;
+        }
+
+        printf("Enter a valid positive number.\n");
+    }
+}
+
+int askYesNo(const char *prompt) {
+    char line[32];
+
+    while (true) {
+        printf("%s", prompt);
+
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            return 0;
+        }
+
+        if (tolower(line[0]) == 'y') {
+            return 1;
+        }
+
+        if (tolower(line[0]) == 'n') {
+            return 0;
+        }
+
+        printf("Please type yes or no.\n");
+    }
+}
+
+/* -------------------- CITY MAP -------------------- */
+
+void addRoad(int from, int to, double km, double minutes,
+             double width, double reliability) {
+    Road road;
+
+    road.exists = true;
+    road.distanceKm = km;
+    road.baseMinutes = minutes;
+    road.currentMinutes = minutes;
+    road.widthMeters = width;
+    road.reliability = reliability;
+    road.incidentDelay = 0.0;
+    road.status = OPEN;
+
+    city[from][to] = road;
+    city[to][from] = road;
+}
+
+double weatherMultiplier() {
+    if (activeWeather == LIGHT_RAIN) return 1.10;
+    if (activeWeather == HEAVY_RAIN) return 1.25;
+    if (activeWeather == STORM) return 1.45;
+
+    return 1.00;
+}
+
+double weatherRisk() {
+    if (activeWeather == LIGHT_RAIN) return 5.0;
+    if (activeWeather == HEAVY_RAIN) return 20.0;
+    if (activeWeather == STORM) return 40.0;
+
+    return 0.0;
+}
+
+const char *weatherName() {
+    if (activeWeather == LIGHT_RAIN) return "Light Rain";
+    if (activeWeather == HEAVY_RAIN) return "Heavy Rain";
+    if (activeWeather == STORM) return "Storm";
+
+    return "Clear";
+}
+
+const char *statusName(Status status) {
+    if (status == CONGESTED) return "Congested";
+    if (status == FLOODED) return "Flooded";
+    if (status == BLOCKED) return "Blocked";
+
+    return "Open";
+}
+
+void refreshTravelTimes() {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            if (city[i][j].exists) {
+                city[i][j].currentMinutes =
+                    city[i][j].baseMinutes * weatherMultiplier() +
+                    city[i][j].incidentDelay;
+            }
+        }
+    }
+}
+
+void setIncident(int from, int to, Status status, double delay) {
+    city[from][to].status = status;
+    city[from][to].incidentDelay = delay;
+
+    city[to][from].status = status;
+    city[to][from].incidentDelay = delay;
+
+    refreshTravelTimes();
+}
+
+void createDemoCity() {
+    addRoad(HOSPITAL, CENTRAL_JUNCTION, 1.2, 3.0, 6.0, 95);
+    addRoad(CENTRAL_JUNCTION, MARKET, 1.3, 4.0, 5.5, 95);
+    addRoad(MARKET, COLLEGE, 1.4, 4.0, 5.0, 92);
+
+    addRoad(HOSPITAL, FIRE_STATION, 1.0, 3.5, 5.5, 98);
+    addRoad(FIRE_STATION, RIVER_ROAD, 2.0, 5.0, 6.0, 99);
+    addRoad(RIVER_ROAD, COLLEGE, 1.6, 4.5, 6.0, 96);
+
+    addRoad(CENTRAL_JUNCTION, OLD_BRIDGE, 0.9, 2.0, 3.0, 70);
+    addRoad(OLD_BRIDGE, COLLEGE, 1.7, 3.5, 3.0, 75);
+
+    addRoad(CENTRAL_JUNCTION, STATION, 1.7, 5.2, 5.0, 98);
+    addRoad(STATION, COLLEGE, 1.2, 3.5, 5.5, 98);
+
+    addRoad(MARKET, RELIEF_CAMP, 1.0, 3.2, 4.0, 85);
+    addRoad(RELIEF_CAMP, COLLEGE, 1.6, 4.4, 4.5, 88);
+    addRoad(HOSPITAL, RELIEF_CAMP, 2.3, 7.0, 4.0, 90);
+
+    refreshTravelTimes();
+}
+
+/* -------------------- INCIDENT REPORTING -------------------- */
+
+void printPlaces() {
+    printf("\nAvailable locations:\n");
+
+    for (int i = 0; i < N; i++) {
+        printf("%d. %s\n", i + 1, places[i]);
+    }
+}
+
+void reportIncidents() {
+    while (askYesNo("\nAny police/control-room accident report? (yes/no): ")) {
+        int from;
+        int to;
+        int choice;
+        Status status;
+        double delay;
+
+        printPlaces();
+
+        from = readChoice(
+            "\nSelect the first location of affected road: ",
+            1, N
+        ) - 1;
+
+        to = readChoice(
+            "Select the second location of affected road: ",
+            1, N
+        ) - 1;
+
+        if (from == to || !city[from][to].exists) {
+            printf("There is no direct road between those locations.\n");
+            continue;
+        }
+
+        printf("\nIncident type:\n");
+        printf("1. Congestion\n");
+        printf("2. Flooded Road\n");
+        printf("3. Accident / Road Blocked\n");
+
+        choice = readChoice("Choose incident type: ", 1, 3);
+
+        if (choice == 1) {
+            status = CONGESTED;
+            delay = readDouble("Extra delay in minutes: ");
+        } else if (choice == 2) {
+            status = FLOODED;
+            delay = readDouble("Extra delay in minutes: ");
+        } else {
+            status = BLOCKED;
+            delay = 0.0;
+        }
+
+        setIncident(from, to, status, delay);
+
+        printf("\nIncident recorded: %s <-> %s is now %s.\n",
+               places[from],
+               places[to],
+               statusName(status));
+    }
+}
+
+void chooseWeather() {
+    int choice;
+
+    printf("\nCurrent weather condition:\n");
+    printf("1. Clear\n");
+    printf("2. Light Rain\n");
+    printf("3. Heavy Rain\n");
+    printf("4. Storm / Extreme Rain\n");
+
+    choice = readChoice("Choose weather: ", 1, 4);
+
+    activeWeather = (Weather)(choice - 1);
+    refreshTravelTimes();
+
+    printf("\nWeather updated: %s\n", weatherName());
+}
+
+/* -------------------- ROUTING ALGORITHM -------------------- */
+
+double roadRisk(const Road *road) {
+    double risk = 100.0 - road->reliability;
+
+    if (road->widthMeters < 3.5) {
+        risk += 30.0;
+    } else if (road->widthMeters < 4.5) {
+        risk += 10.0;
+    }
+
+    if (road->status == CONGESTED) {
+        risk += 12.0;
+    } else if (road->status == FLOODED) {
+        risk += 35.0;
+    }
+
+    risk += weatherRisk();
+
+    return risk;
+}
+
+bool isBannedRoad(int from, int to, int banA, int banB) {
+    return (from == banA && to == banB) ||
+           (from == banB && to == banA);
+}
+
+Route findRoute(int source, int destination, bool preferSafety,
+                int banA, int banB) {
+    double cost[N];
+    int previous[N];
+    bool visited[N] = {false};
+    Route route = {0};
+
+    for (int i = 0; i < N; i++) {
+        cost[i] = DBL_MAX;
+        previous[i] = -1;
+    }
+
+    cost[source] = 0.0;
+
+    for (int step = 0; step < N; step++) {
+        int current = -1;
+        double bestCost = DBL_MAX;
+
+        for (int i = 0; i < N; i++) {
+            if (!visited[i] && cost[i] < bestCost) {
+                bestCost = cost[i];
+                current = i;
+            }
+        }
+
+        if (current == -1 || current == destination) {
+            break;
+        }
+
+        visited[current] = true;
+
+        for (int next = 0; next < N; next++) {
+            Road *road = &city[current][next];
+            double edgeCost;
+
+            if (!road->exists ||
+                road->status == BLOCKED ||
+                isBannedRoad(current, next, banA, banB)) {
+                continue;
+            }
+
+            edgeCost = road->currentMinutes;
+
+            if (preferSafety) {
+                edgeCost += roadRisk(road) / 7.0;
+            }
+
+            if (cost[current] + edgeCost < cost[next]) {
+                cost[next] = cost[current] + edgeCost;
+                previous[next] = current;
+            }
+        }
+    }
+
+    if (cost[destination] == DBL_MAX) {
+        return route;
+    }
+
+    int reversedPath[N];
+    int count = 0;
+
+    for (int node = destination; node != -1; node = previous[node]) {
+        reversedPath[count++] = node;
+
+        if (node == source) {
+            break;
+        }
+    }
+
+    if (reversedPath[count - 1] != source) {
+        return route;
+    }
+
+    route.found = true;
+    route.score = cost[destination];
+    route.length = count;
+
+    for (int i = 0; i < count; i++) {
+        route.path[i] = reversedPath[count - 1 - i];
+    }
+
+    for (int i = 0; i < route.length - 1; i++) {
+        Road *road = &city[route.path[i]][route.path[i + 1]];
+
+        route.eta += road->currentMinutes;
+        route.distance += road->distanceKm;
+        route.risk += roadRisk(road);
+    }
+
+    return route;
+}
+
+Route findBackupRoute(const Route *primary, int source, int destination) {
+    Route bestBackup = {0};
+
+    for (int i = 0; i < primary->length - 1; i++) {
+        Route candidate = findRoute(
+            source,
+            destination,
+            true,
+            primary->path[i],
+            primary->path[i + 1]
+        );
+
+        if (candidate.found &&
+            (!bestBackup.found ||
+             candidate.score < bestBackup.score)) {
+            bestBackup = candidate;
+        }
+    }
+
+    return bestBackup;
+}
+
+/* -------------------- OUTPUT -------------------- */
+
+void printActiveIncidents() {
+    bool found = false;
+
+    printf("\nActive control-room reports:\n");
+
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            if (city[i][j].exists &&
+                city[i][j].status != OPEN) {
+                printf("- %s <-> %s: %s\n",
+                       places[i],
+                       places[j],
+                       statusName(city[i][j].status));
+
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        printf("- No accident, flood, or congestion reports.\n");
+    }
+}
+
+void printRoute(const char *title, const Route *route) {
+    bool hasIncident = false;
+
+    printf("\n%s\n", title);
+    printf("Path: ");
+
+    for (int i = 0; i < route->length; i++) {
+        printf("%s", places[route->path[i]]);
+
+        if (i < route->length - 1) {
+            printf(" -> ");
+        }
+    }
+
+    printf("\nETA: %.1f minutes\n", route->eta);
+    printf("Distance: %.1f km\n", route->distance);
+    printf("Risk score: %.0f\n", route->risk);
+
+    printf("Road conditions: ");
+
+    for (int i = 0; i < route->length - 1; i++) {
+        Road *road = &city[route->path[i]][route->path[i + 1]];
+
+        if (road->status != OPEN) {
+            printf("%s-%s is %s; ",
+                   places[route->path[i]],
+                   places[route->path[i + 1]],
+                   statusName(road->status));
+
+            hasIncident = true;
+        }
+    }
+
+    if (!hasIncident) {
+        printf("No active incident on selected roads.");
+    }
+
+    printf("\n");
+}
+
+/* -------------------- MAIN -------------------- */
+
+int main() {
+    int source;
+    int destination;
+    Route fastest;
+    Route safest;
+    Route primary;
+    Route backup;
+    bool selectedSafeRoute;
+
+    createDemoCity();
+
+    printf("=============================================\n");
+    printf("   RESQROUTE OFFLINE - EMERGENCY ROUTING\n");
+    printf("=============================================\n");
+    printf("This prototype simulates weather and verified\n");
+    printf("police/control-room accident reports.\n");
+
+    chooseWeather();
+    reportIncidents();
+    printActiveIncidents();
+
+    printPlaces();
+
+    source = readChoice(
+        "\nEnter emergency vehicle start location: ",
+        1, N
+    ) - 1;
+
+    destination = readChoice(
+        "Enter emergency destination: ",
+        1, N
+    ) - 1;
+
+    if (source == destination) {
+        printf("Start and destination cannot be the same.\n");
+        return 1;
+    }
+
+    fastest = findRoute(source, destination, false, -1, -1);
+    safest = findRoute(source, destination, true, -1, -1);
+
+    if (!fastest.found || !safest.found) {
+        printf("No safe route is available.\n");
+        return 1;
+    }
+
+    selectedSafeRoute =
+        safest.eta <= fastest.eta + MAX_DETOUR_MINUTES;
+
+    primary = selectedSafeRoute ? safest : fastest;
+    backup = findBackupRoute(&primary, source, destination);
+
+    printf("\n=============================================\n");
+    printf("EMERGENCY ROUTE DECISION\n");
+    printf("Weather: %s\n", weatherName());
+    printf("=============================================\n");
+
+    printRoute("FASTEST ROUTE", &fastest);
+    printRoute("RECOMMENDED EMERGENCY ROUTE", &primary);
+
+    if (selectedSafeRoute && primary.eta > fastest.eta) {
+        printf("\nDecision reason:\n");
+        printf("The selected route adds only %.1f minutes,\n",
+               primary.eta - fastest.eta);
+        printf("but reduces the risk score by %.0f points.\n",
+               fastest.risk - primary.risk);
+    } else {
+        printf("\nDecision reason:\n");
+        printf("The fastest route is also the safest available route.\n");
+    }
+
+    if (backup.found) {
+        printRoute("BACKUP ROUTE", &backup);
+    } else {
+        printf("\nNo independent backup route is available.\n");
+    }
+
+    printf("\nImportant: This is a software simulation.\n");
+    printf("A real system would receive verified data from\n");
+    printf("police, control rooms, CCTV, weather services,\n");
+    printf("ambulance dispatchers, and traffic systems.\n");
+
+    return 0;
+}
